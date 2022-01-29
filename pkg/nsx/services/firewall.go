@@ -976,7 +976,7 @@ func (service *SecurityPolicyService) updatePeerExpressions(obj *v1alpha1.Securi
 		memberType = "SegmentPort"
 		service.addOperatorIfNeeded(expressions, "AND")
 		podExpression := service.buildExpression(
-			"Condition", memberType, util.TagScopeNCPPod, "Tag", "EQUALS", "EQUALS")
+			"Condition", memberType, fmt.Sprintf("%s|", util.TagScopeNCPPod), "Tag", "EQUALS", "EQUALS")
 		expressions.Add(podExpression)
 
 		if peer.NamespaceSelector == nil {
