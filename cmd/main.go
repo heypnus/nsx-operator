@@ -18,6 +18,7 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/config"
 	securitypolicycontroller "github.com/vmware-tanzu/nsx-operator/pkg/controllers/securitypolicy"
+	subnetportcontroller "github.com/heypnus/nsx-operator/pkg/controllers/subnetport"
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	"github.com/vmware-tanzu/nsx-operator/pkg/metrics"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
@@ -64,6 +65,23 @@ func StartSecurityPolicyController(mgr ctrl.Manager, commonService common.Servic
 	}
 	if err := securityReconcile.Start(mgr); err != nil {
 		log.Error(err, "failed to create controller", "controller", "SecurityPolicy")
+		os.Exit(1)
+	}
+}
+
+func StartSubnetPortController(mgr ctrl.Manager, commonService common.Service) {
+	subnetPortReconcile := &subnetportcontroller.SubnetPortReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}
+	// if subnetPortService, err := subnetport.InitializeSecurityPolicy(commonService); err != nil {
+	// 	log.Error(err, "failed to initialize subnetport commonService", "controller", "SubnetPort")
+	// 	os.Exit(1)
+	// } else {
+	// 	subnetPortReconcile.Service = subnetPortService
+	// }
+	if err := subnetPortReconcile.Start(mgr); err != nil {
+		log.Error(err, "failed to create controller", "controller", "SubnetPort")
 		os.Exit(1)
 	}
 }
