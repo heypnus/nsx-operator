@@ -18,6 +18,12 @@ const (
 	MetricResTypeSubnetSet         = "subnetset"
 	MetricResTypeVPC               = "vpc"
 	MetricResTypeNamespace         = "namespace"
+	MetricResTypePod               = "pod"
+	MetricResTypeNode              = "node"
+
+	// TODO: confirm the annotation key
+	AnnotationPodMAC        = "nsx-operator/mac"
+	AnnotationPodAttachment = "nsx-operator/attachment"
 )
 
 var (

@@ -58,6 +58,7 @@ type Client struct {
 	IPBlockClient              infra.IpBlocksClient
 	NATRuleClient              nat.NatRulesClient
 	ClusterControlPlanesClient enforcement_points.ClusterControlPlanesClient
+	HostTransPortNodesClient   enforcement_points.HostTransportNodesClient
 	SubnetStatusClient         subnets.StatusClient
 	RealizedEntitiesClient     realized_state.RealizedEntitiesClient
 	ProjectInfraClient         projects.InfraClient
@@ -130,6 +131,7 @@ func GetClient(cf *config.NSXOperatorConfig) *Client {
 	ipBlockClient := infra.NewIpBlocksClient(restConnector(cluster))
 	natRulesClient := nat.NewNatRulesClient(restConnector(cluster))
 	clusterControlPlanesClient := enforcement_points.NewClusterControlPlanesClient(restConnector(cluster))
+	hostTransportNodesClient := enforcement_points.NewHostTransportNodesClient(restConnector(cluster))
 	realizedEntitiesClient := realized_state.NewRealizedEntitiesClient(restConnector(cluster))
 	mpQueryClient := mpsearch.NewQueryClient(restConnector(cluster))
 	certificatesClient := trust_management.NewCertificatesClient(restConnector(cluster))
@@ -167,6 +169,7 @@ func GetClient(cf *config.NSXOperatorConfig) *Client {
 		IPBlockClient:              ipBlockClient,
 		NATRuleClient:              natRulesClient,
 		ClusterControlPlanesClient: clusterControlPlanesClient,
+		HostTransPortNodesClient:   hostTransportNodesClient,
 		RealizedEntitiesClient:     realizedEntitiesClient,
 
 		MPQueryClient:             mpQueryClient,

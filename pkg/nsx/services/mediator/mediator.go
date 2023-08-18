@@ -1,11 +1,14 @@
 package mediator
 
 import (
+	"fmt"
+
 	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt/model"
 
 	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/node"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/securitypolicy"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnet"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnetport"
@@ -27,6 +30,7 @@ type ServiceMediator struct {
 	*vpc.VPCService
 	*subnet.SubnetService
 	*subnetport.SubnetPortService
+	*node.NodeService
 }
 
 // ListVPCInfo is a common method, extracting the org, the project, and the vpc string from vpc path of the VPC model.
@@ -74,4 +78,19 @@ func (serviceMediator *ServiceMediator) GetAvailableSubnet(subnetSet *v1alpha1.S
 func (serviceMediator *ServiceMediator) GetPortsOfSubnet(nsxSubnetID string) (ports []model.SegmentPort) {
 	subnetPortList := serviceMediator.SubnetPortStore.GetByIndex(common.IndexKeySubnetID, nsxSubnetID)
 	return subnetPortList
+}
+
+func (serviceMediator *ServiceMediator) GetNodeIDByName(nodeName string) (string, error) {
+	nodes := serviceMediator.NodeStore.GetByIndex(common.IndexKeyNodeName, nodeName)
+	if len(nodes) == 0 {
+		return "", fmt.Errorf("node %s not found", nodeName)
+	}
+	if len(nodes) > 1 {
+		var nodeIDs []string
+		for _, node := range nodes {
+			nodeIDs = append(nodeIDs, *node.Id)
+		}
+		return "", fmt.Errorf("multiple node IDs found for node %s: %v", nodeName, nodeIDs)
+	}
+	return *nodes[0].Id, nil
 }

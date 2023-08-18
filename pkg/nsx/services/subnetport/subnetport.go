@@ -5,11 +5,11 @@ package subnetport
 
 import (
 	"errors"
-	"strings"
 
 	"sync"
 
 	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt/model"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
@@ -50,6 +50,7 @@ func InitializeSubnetPort(service servicecommon.Service) (*SubnetPortService, er
 			keyFunc,
 			cache.Indexers{
 				servicecommon.TagScopeSubnetPortCRUID: subnetPortIndexByCRUID,
+				servicecommon.TagScopePodUID:          subnetPortIndexByPodUID,
 				servicecommon.IndexKeySubnetID:        subnetPortIndexBySubnetID,
 			}),
 		BindingType: model.SegmentPortBindingType(),
@@ -73,18 +74,18 @@ func InitializeSubnetPort(service servicecommon.Service) (*SubnetPortService, er
 	return subnetPortService, nil
 }
 
-func (service *SubnetPortService) CreateOrUpdateSubnetPort(obj *v1alpha1.SubnetPort, nsxSubnetPath string) error {
-
+func (service *SubnetPortService) CreateOrUpdateSubnetPort(obj interface{}, nsxSubnetPath string, contextID string) (*model.SegmentPortState, error) {
 	log.Info("Creating or updating subnetport", "subnetport", obj)
-	nsxSubnetPort, err := service.buildSubnetPort(obj, nsxSubnetPath)
+	nsxSubnetPort, err := service.buildSubnetPort(obj, nsxSubnetPath, contextID)
 	if err != nil {
 		log.Error(err, "failed to build NSX subnet port")
-		return err
+		return nil, err
 	}
 
 	subnetInfo, err := servicecommon.ParseVPCResourcePath(nsxSubnetPath)
 	if err != nil {
 		log.Error(err, "failed to parse NSX subnet path", "path", nsxSubnetPath)
+		return nil, err
 	}
 	existingSubnetPort := service.SubnetPortStore.GetByKey(*nsxSubnetPort.Id)
 	isChanged := servicecommon.CompareResource(SubnetPortToComparable(existingSubnetPort), SubnetPortToComparable(nsxSubnetPort))
@@ -95,11 +96,11 @@ func (service *SubnetPortService) CreateOrUpdateSubnetPort(obj *v1alpha1.SubnetP
 		err = service.NSXClient.PortClient.Patch(subnetInfo.OrgID, subnetInfo.ProjectID, subnetInfo.VPCID, subnetInfo.ID, *nsxSubnetPort.Id, *nsxSubnetPort)
 		if err != nil {
 			log.Error(err, "failed to create or update subnet port")
-			return err
+			return nil, err
 		}
 		err = service.SubnetPortStore.Operate(nsxSubnetPort)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if existingSubnetPort != nil {
 			log.Info("updated NSX subnet port", "subnetPort", nsxSubnetPort)
@@ -107,54 +108,62 @@ func (service *SubnetPortService) CreateOrUpdateSubnetPort(obj *v1alpha1.SubnetP
 			log.Info("created NSX subnet port", "subnetPort", nsxSubnetPort)
 		}
 	}
-	if err := service.CheckSubnetPortState(obj, nsxSubnetPath); err != nil {
-		log.Error(err, "check and update NSX subnet port state failed, would retry exponentially", "subnetport", obj.UID)
-		return err
+	nsxSubnetPortState, err := service.CheckSubnetPortState(obj, nsxSubnetPath)
+	if err != nil {
+		log.Error(err, "check and update NSX subnet port state failed, would retry exponentially", "subnetport", obj)
+		return nil, err
 	}
-	log.Info("successfully created or updated subnetport", "subnetport", obj.UID)
-	return nil
+	log.Info("successfully created or updated subnetport", "subnetport", obj)
+	return nsxSubnetPortState, nil
 }
 
 // CheckSubnetPortState will check the port realized status then get the port state to prepare the CR status.
-func (service *SubnetPortService) CheckSubnetPortState(obj *v1alpha1.SubnetPort, nsxSubnetPath string) error {
-	nsxSubnetPort := service.SubnetPortStore.GetByKey(string(obj.UID))
+func (service *SubnetPortService) CheckSubnetPortState(obj interface{}, nsxSubnetPath string) (*model.SegmentPortState, error) {
+	var uid types.UID
+	switch o := obj.(type) {
+	case *v1alpha1.SubnetPort:
+		uid = o.UID
+	case *v1.Pod:
+		uid = o.UID
+	}
+	nsxSubnetPort := service.SubnetPortStore.GetByKey(string(uid))
 	if nsxSubnetPort == nil {
-		return errors.New("failed to get subnet port from store")
+		return nil, errors.New("failed to get subnet port from store")
 	}
 	realizeService := realizestate.InitializeRealizeState(service.Service)
 	if err := realizeService.CheckRealizeState(retry.DefaultRetry, *nsxSubnetPort.Path, "RealizedLogicalPort"); err != nil {
 		log.Error(err, "failed to get realized status", "subnetport path", *nsxSubnetPort.Path)
 		if realizestate.IsRealizeStateError(err) {
-			log.Error(err, "the created subnet port is in error realization state, cleaning the resource", "subnetport", obj.UID)
+			log.Error(err, "the created subnet port is in error realization state, cleaning the resource", "subnetport", uid)
 			// only recreate subnet port on RealizationErrorStateError.
-			if err := service.DeleteSubnetPort(obj.UID); err != nil {
-				log.Error(err, "cleanup error subnetport failed", "subnetport", obj.UID)
-				return err
+			if err := service.DeleteSubnetPort(uid); err != nil {
+				log.Error(err, "cleanup error subnetport failed", "subnetport", uid)
+				return nil, err
 			}
 		}
-		return err
+		return nil, err
 	}
 	// TODO: avoid to get subnetport state again if we already got it.
 	nsxPortState, err := service.GetSubnetPortState(obj, nsxSubnetPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	log.Info("Got the NSX subnet port state", "nsxPortState.RealizedBindings", nsxPortState.RealizedBindings)
-
-	ipAddress := v1alpha1.SubnetPortIPAddress{
-		IP: *nsxPortState.RealizedBindings[0].Binding.IpAddress,
-	}
-	obj.Status.IPAddresses = []v1alpha1.SubnetPortIPAddress{ipAddress}
-	obj.Status.MACAddress = strings.Trim(*nsxPortState.RealizedBindings[0].Binding.MacAddress, "\"")
-	obj.Status.VIFID = *nsxPortState.Attachment.Id
-	return nil
+	return nsxPortState, nil
 }
 
-func (service *SubnetPortService) GetSubnetPortState(obj *v1alpha1.SubnetPort, nsxSubnetPath string) (*model.SegmentPortState, error) {
+func (service *SubnetPortService) GetSubnetPortState(obj interface{}, nsxSubnetPath string) (*model.SegmentPortState, error) {
+	var uid types.UID
+	switch o := obj.(type) {
+	case *v1alpha1.SubnetPort:
+		uid = o.UID
+	case *v1.Pod:
+		uid = o.UID
+	}
 	nsxOrgID, nsxProjectID, nsxVPCID, nsxSubnetID := nsxutil.ParseVPCPath(nsxSubnetPath)
-	nsxSubnetPortState, err := service.NSXClient.PortStateClient.Get(nsxOrgID, nsxProjectID, nsxVPCID, nsxSubnetID, string(obj.UID), nil, nil)
+	nsxSubnetPortState, err := service.NSXClient.PortStateClient.Get(nsxOrgID, nsxProjectID, nsxVPCID, nsxSubnetID, string(uid), nil, nil)
 	if err != nil {
-		log.Error(err, "failed to get subnet port state", "nsxSubnetPortID", obj.UID)
+		log.Error(err, "failed to get subnet port state", "nsxSubnetPortID", uid)
 		return nil, err
 	}
 	return &nsxSubnetPortState, nil
@@ -182,6 +191,12 @@ func (service *SubnetPortService) DeleteSubnetPort(uid types.UID) error {
 func (service *SubnetPortService) ListNSXSubnetPortIDForCR() sets.String {
 	log.V(2).Info("listing subnet port CR UIDs")
 	subnetPortSet := service.SubnetPortStore.ListIndexFuncValues(servicecommon.TagScopeSubnetPortCRUID)
+	return subnetPortSet
+}
+
+func (service *SubnetPortService) ListNSXSubnetPortIDForPod() sets.String {
+	log.V(2).Info("listing pod UIDs")
+	subnetPortSet := service.SubnetPortStore.ListIndexFuncValues(servicecommon.TagScopePodUID)
 	return subnetPortSet
 }
 
