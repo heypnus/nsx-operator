@@ -5,6 +5,8 @@ package networkinfo
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -61,8 +63,46 @@ func (r *NetworkInfoReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 			log.V(1).Info("added finalizer on NetworkInfo CR", "NetworkInfo", req.NamespacedName)
 		}
+		// TODO:
+		// 1. check whether the logic to get VPC network config can be replaced by GetVPCNetworkConfigByNamespace
+		// 2. sometimes the variable nc points to a VPCNetworkInfo, sometimes it's a VPCNetworkConfiguration, we need to distinguish between them.
+		ncName, err := r.Service.GetNetworkconfigNameFromNS(obj.Namespace)
+		if err != nil {
+			log.Error(err, "failed to get network config name for VPC when creating NSX VPC", "VPC", obj.Name)
+			return common.ResultRequeueAfter10sec, err
+		}
+		nc, _exist := r.Service.GetVPCNetworkConfig(ncName)
+		if !_exist {
+			message := fmt.Sprintf("failed to read network config %s when creating NSX VPC", ncName)
+			log.Info(message)
+			return common.ResultRequeueAfter10sec, errors.New(message)
+		}
+		log.Info("got network config from store", "NetworkConfig", ncName)
 
-		createdVpc, nc, err := r.Service.CreateOrUpdateVPC(obj)
+		gatewayConnectionReady, _, err := getGatewayConnectionStatus(&ctx, r.Client, commonservice.SystemVPCNetworkConfigurationName)
+		if err != nil {
+			log.Error(err, "failed to get the gateway connection status", "req", req.NamespacedName)
+			return common.ResultRequeueAfter10sec, err
+		}
+
+		reason := ""
+		if !gatewayConnectionReady {
+			if ncName == commonservice.SystemVPCNetworkConfigurationName {
+				gatewayConnectionReady, reason, err = r.Service.ValidateGatewayConnectionStatus(&nc)
+				log.Info("got the gateway connection status", "gatewayConnectionReady", gatewayConnectionReady, "reason", reason)
+				if err != nil {
+					log.Error(err, "failed to validate the edge and gateway connection", "org", nc.Org, "project", nc.NSXProject)
+					updateFail(r, &ctx, obj, &err, r.Client, nil)
+					return common.ResultRequeueAfter10sec, err
+				}
+				setVPCNetworkConfigurationStatusWithGatewayConnection(&ctx, r.Client, ncName, gatewayConnectionReady, reason)
+			} else {
+				log.Info("skipping reconciling the network info because the system gateway connection is not ready", "NetworkInfo", req.NamespacedName)
+				return common.ResultRequeueAfter60sec, nil
+			}
+		}
+
+		createdVpc, err := r.Service.CreateOrUpdateVPC(obj, &nc)
 		if err != nil {
 			log.Error(err, "create vpc failed, would retry exponentially", "VPC", req.NamespacedName)
 			updateFail(r, &ctx, obj, &err, r.Client, nil)
@@ -116,7 +156,8 @@ func (r *NetworkInfoReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		// currently, auto snat is not exposed, and use default value True
 		// checking autosnat to support future extension in vpc configuration
-		if isEnableAutoSNAT() {
+		autoSnatEnabled := isEnableAutoSNAT()
+		if autoSnatEnabled {
 			snatIP, err = r.Service.GetDefaultSNATIP(*createdVpc)
 			if err != nil {
 				log.Error(err, "failed to read default SNAT ip from VPC", "VPC", createdVpc.Id)
@@ -129,6 +170,15 @@ func (r *NetworkInfoReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				}
 				updateFail(r, &ctx, obj, &err, r.Client, state)
 				return common.ResultRequeueAfter10sec, err
+			}
+		}
+		if ncName == commonservice.SystemVPCNetworkConfigurationName {
+			if autoSnatEnabled {
+				log.Info("detected that the AutoSnat is enabled", "req", req.NamespacedName)
+				setVPCNetworkConfigurationStatusWithSnatEnabled(&ctx, r.Client, ncName, true)
+			} else {
+				log.Info("detected that the AutoSnat is diabled", "req", req.NamespacedName)
+				setVPCNetworkConfigurationStatusWithSnatEnabled(&ctx, r.Client, ncName, false)
 			}
 		}
 
@@ -158,7 +208,9 @@ func (r *NetworkInfoReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			LoadBalancerIPAddresses: cidr,
 			PrivateIPs:              nc.PrivateIPs,
 		}
-		updateSuccess(r, &ctx, obj, r.Client, state, nc.Name, path, r.Service.GetNSXLBSPath(*createdVpc.Id))
+		// AKO needs to know the AVI subnet path created by NSX
+		setVPCNetworkConfigurationStatusWithLBS(&ctx, r.Client, ncName, state.Name, path, r.Service.GetNSXLBSPath(*createdVpc.Id))
+		updateSuccess(r, &ctx, obj, r.Client, state, nc.Name, path)
 	} else {
 		if controllerutil.ContainsFinalizer(obj, commonservice.NetworkInfoFinalizerName) {
 			metrics.CounterInc(r.Service.NSXConfig, metrics.ControllerDeleteTotal, common.MetricResTypeNetworkInfo)
