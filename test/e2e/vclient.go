@@ -360,7 +360,7 @@ func handleHTTPResponse(response *http.Response, result interface{}) (int, error
 	} else if statusCode == http.StatusBadRequest {
 		err = util.HttpBadRequest
 	} else {
-		err = fmt.Errorf("HTTP response with errorcode %d", response.StatusCode)
+		err = fmt.Errorf("HTTP response with errorcode %d: %s", response.StatusCode, response.Body)
 	}
 	return statusCode, err
 }
