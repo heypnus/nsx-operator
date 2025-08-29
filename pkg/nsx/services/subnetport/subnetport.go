@@ -569,6 +569,19 @@ func (service *SubnetPortService) AllocatePortFromSubnet(subnet *model.VpcSubnet
 		}
 	}
 
+
+	// For DHCP Deactivated mode Subnet, if staticIpAllocation enable:false, skip check IP count
+	// and always return true
+	staticIpAllocationEnabled := false
+	if dhcpMode == "DHCP_DEACTIVATED" {
+		if subnet.AdvancedConfig != nil && subnet.AdvancedConfig.StaticIpAllocation != nil && subnet.AdvancedConfig.StaticIpAllocation.Enabled != nil {
+			staticIpAllocationEnabled = *subnet.AdvancedConfig.StaticIpAllocation.Enabled
+		}
+		if !staticIpAllocationEnabled {
+			// for staticIpAllocation enable:false case, it can create SubnetPort and skip check the IP count
+			return true, nil
+		}
+	}
 	if !ok {
 		// For DHCP Deactivated mode Subnet, get total IPs from IP pool static-ipv4-default
 		if dhcpMode == "DHCP_DEACTIVATED" {
