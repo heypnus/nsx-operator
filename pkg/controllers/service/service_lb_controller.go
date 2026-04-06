@@ -59,7 +59,6 @@ func (r *ServiceLbReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	defer func() {
 		log.Info("Finished reconciling LB service", "LBService", req.NamespacedName, "duration(ms)", time.Since(startTime).Milliseconds())
 	}()
-
 	if err := r.Client.Get(ctx, req.NamespacedName, service); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("Not found LB service", "req", req.NamespacedName)
@@ -121,6 +120,7 @@ func (r *ServiceLbReconciler) setServiceLbStatus(ctx context.Context, lbService 
 func (r *ServiceLbReconciler) setupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1.Service{}).
+		WithEventFilter(common.VPCNamespacePredicate(r.Client)).
 		WithOptions(
 			controller.Options{
 				MaxConcurrentReconciles: common.NumReconcile(),

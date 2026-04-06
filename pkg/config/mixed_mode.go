@@ -350,3 +350,19 @@ func GetNamespaceNetworkProvider(ns *v1.Namespace) string {
 	}
 	return ns.Labels[NetworkProviderLabel]
 }
+
+// IsVPCNamespace reports whether ns should be treated as a VPC namespace.
+//
+// In legacy mode (pre-9.2, per-namespace providers not supported) the whole
+// cluster runs a single provider, so the cluster-level HasVPCNamespaces flag
+// (derived from EnableVPCNetwork) is returned regardless of the namespace's
+// own label.
+//
+// In mixed mode (per-namespace providers supported) the namespace's
+// iaas.vmware.com/network-provider label is checked directly.
+func IsVPCNamespace(ns *v1.Namespace) bool {
+	if !IsPerNamespaceProvidersSupported() {
+		return HasVPCNamespaces()
+	}
+	return GetNamespaceNetworkProvider(ns) == ProviderNSXVPC
+}
