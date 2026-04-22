@@ -139,6 +139,15 @@ func createNetworkInfoReconciler(objs []client.Object) *NetworkInfoReconciler {
 }
 
 func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
+	// The bulk of these table-driven cases predate the M1 day0/day2
+	// verification bypass and exercise the original "not ready -> requeue or
+	// validate against NSX" path. Disable the bypass here so they keep
+	// covering that path; a dedicated case (BypassDay0Day2Verification)
+	// re-enables and asserts the M1 behavior.
+	prevBypass := bypassDay0Day2Verification
+	bypassDay0Day2Verification = false
+	defer func() { bypassDay0Day2Verification = prevBypass }()
+
 	type args struct {
 		req controllerruntime.Request
 	}
@@ -1315,6 +1324,81 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNetworkInfoReconciler_Reconcile_BypassDay0Day2Verification asserts the
+// M1 bypass: when bypassDay0Day2Verification is true and the system VPC
+// network configuration does NOT report gateway/service-cluster ready, the
+// reconciler must (a) skip the ValidateConnectionStatus call entirely and
+// (b) proceed to CreateOrUpdateVPC instead of requeuing after 60s. This
+// replaces the previous manual `kubectl apply` workaround.
+func TestNetworkInfoReconciler_Reconcile_BypassDay0Day2Verification(t *testing.T) {
+	prevBypass := bypassDay0Day2Verification
+	bypassDay0Day2Verification = true
+	defer func() { bypassDay0Day2Verification = prevBypass }()
+
+	requestArgs := controllerruntime.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "name"},
+	}
+
+	ns1 := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}}
+	r := createNetworkInfoReconciler([]client.Object{ns1})
+	v1alpha1.AddToScheme(r.Scheme)
+	ctx := context.TODO()
+
+	require.NoError(t, r.Client.Create(ctx, &v1alpha1.NetworkInfo{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: requestArgs.NamespacedName.Namespace,
+			Name:      requestArgs.NamespacedName.Name,
+		},
+	}))
+	// Note: the system VPCNetworkConfiguration intentionally has no Status
+	// conditions populated — that is exactly the M1 condition the bypass
+	// addresses.
+	require.NoError(t, r.Client.Create(ctx, &v1alpha1.VPCNetworkConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: servicecommon.SystemVPCNetworkConfigurationName},
+	}))
+
+	patches := gomonkey.ApplyMethod(reflect.TypeOf(r.Service), "GetNetworkconfigNameFromNS",
+		func(_ *vpc.VPCService, _ context.Context, _ string) (string, error) {
+			return "non-system", nil
+		})
+	defer patches.Reset()
+	patches.ApplyMethod(reflect.TypeOf(r.Service), "GetVPCNetworkConfig",
+		func(_ *vpc.VPCService, _ string) (*v1alpha1.VPCNetworkConfiguration, bool, error) {
+			return &v1alpha1.VPCNetworkConfiguration{
+				ObjectMeta: metav1.ObjectMeta{Name: "non-system"},
+				Spec: v1alpha1.VPCNetworkConfigurationSpec{
+					VPCConnectivityProfile: "/orgs/default/projects/proj/vpc-connectivity-profiles/default",
+					NSXProject:             "/orgs/default/projects/proj",
+				},
+			}, true, nil
+		})
+	// ValidateConnectionStatus must NOT be invoked under the bypass.
+	patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateConnectionStatus",
+		func(_ *vpc.VPCService, _ *v1alpha1.VPCNetworkConfiguration, _ string) (*servicecommon.VPCConnectionStatus, error) {
+			assert.FailNow(t, "ValidateConnectionStatus must not be called when bypass is enabled")
+			return nil, nil
+		})
+	createOrUpdateCalled := false
+	patches.ApplyMethod(reflect.TypeOf(r.Service), "GetLBProvider",
+		func(_ *vpc.VPCService) (vpc.LBProvider, error) {
+			return vpc.NoneLB, nil
+		})
+	patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC",
+		func(_ *vpc.VPCService, _ context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
+			createOrUpdateCalled = true
+			// Return an error so we don't have to mock the long success
+			// tail. The assertion we care about is that we *reached* this
+			// call instead of bailing out at the readiness gate.
+			return nil, fmt.Errorf("stub: bypass reached CreateOrUpdateVPC")
+		})
+	patches.ApplyFunc(setNSNetworkReadyCondition,
+		func(_ context.Context, _ client.Client, _ string, _ *corev1.NamespaceCondition) {})
+
+	_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: requestArgs.NamespacedName})
+	require.True(t, createOrUpdateCalled,
+		"CreateOrUpdateVPC must be reached when bypass is enabled and system VPC is not marked ready")
 }
 
 func TestNetworkInfoReconciler_deleteStaleVPCs(t *testing.T) {

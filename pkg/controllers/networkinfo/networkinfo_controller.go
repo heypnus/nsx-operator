@@ -43,6 +43,15 @@ const (
 	preVPCSyncInterval = time.Minute * 10
 )
 
+// bypassDay0Day2Verification disables the system VPCNetworkConfiguration
+// gateway-connection / service-cluster readiness gate during NetworkInfo
+// reconciliation. M1 supervisor clusters do not have anyone populating that
+// status block, so the previous behavior was to requeue every non-system
+// NetworkInfo forever and rely on a manual `kubectl apply` workaround. M2
+// will replace this flag with a real day0/day2 verification controller; see
+// docs/my-m2-design.md M2-6.
+var bypassDay0Day2Verification = true
+
 var (
 	log           = logger.Log
 	MetricResType = common.MetricResTypeNetworkInfo
@@ -242,31 +251,48 @@ func (r *NetworkInfoReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	serviceClusterReady, _ := getServiceClusterStatus(systemVpcNetCfg)
 
 	if !gatewayConnectionReady && !serviceClusterReady {
-		// Retry after 60s if the gateway connection is not ready in system VPC.
-		if ncName != commonservice.SystemVPCNetworkConfigurationName {
-			log.Info("Skipping reconciliation due to unready system gateway connection and service cluster", "NetworkInfo", req.NamespacedName)
-			setNSNetworkReadyCondition(ctx, r.Client, req.Namespace, nsMsgVPCConnectionNotReady.getNSNetworkCondition())
-			return common.ResultRequeueAfter60sec, nil
-		}
+		if bypassDay0Day2Verification {
+			// M1 mixed-mode bypass: in supervisor clusters the system
+			// VPCNetworkConfiguration status is not populated by anyone at the
+			// time the first NetworkInfo arrives, which causes every
+			// non-system NetworkInfo to requeue forever. The previous M1
+			// workaround was to manually `kubectl apply` a fully populated
+			// status block; this code-level bypass replaces that hack by
+			// treating both readiness flags as true and proceeding.
+			// TODO(M2): replace with real day0/day2 verification driven by a
+			// dedicated controller; see docs/my-m2-design.md M2-6.
+			log.Info("Bypassing day0/day2 verification (M1)",
+				"NetworkInfo", req.NamespacedName,
+				"systemVPCNetworkConfiguration", systemVpcNetCfg.Name)
+			gatewayConnectionReady = true
+			serviceClusterReady = true
+		} else {
+			// Retry after 60s if the gateway connection is not ready in system VPC.
+			if ncName != commonservice.SystemVPCNetworkConfigurationName {
+				log.Info("Skipping reconciliation due to unready system gateway connection and service cluster", "NetworkInfo", req.NamespacedName)
+				setNSNetworkReadyCondition(ctx, r.Client, req.Namespace, nsMsgVPCConnectionNotReady.getNSNetworkCondition())
+				return common.ResultRequeueAfter60sec, nil
+			}
 
-		// Re-check the gateway connection and service cluster readiness in system VPC on NSX.
-		connectionStatus, err := r.Service.ValidateConnectionStatus(nc, nc.Spec.VPCConnectivityProfile)
-		if err != nil {
-			log.Error(err, "Failed to get the connection status")
-			r.StatusUpdater.UpdateFail(ctx, networkInfoCR, err, fmt.Sprintf("Failed to validate the edge and gateway connection, Project: %s", nc.Spec.NSXProject), setNetworkInfoVPCStatusWithError, nil)
-			setNSNetworkReadyCondition(ctx, r.Client, req.Namespace, nsMsgVPCGwConnectionGetError.getNSNetworkCondition(err))
-			return common.ResultRequeueAfter10sec, err
-		}
-		log.Info("Got the connection status", "status", connectionStatus)
-		setVPCNetworkConfigurationStatusWithGatewayConnection(ctx, r.Client, systemVpcNetCfg, connectionStatus)
-		gatewayConnectionReady = connectionStatus.GatewayConnectionReady
-		serviceClusterReady = connectionStatus.ServiceClusterReady
+			// Re-check the gateway connection and service cluster readiness in system VPC on NSX.
+			connectionStatus, err := r.Service.ValidateConnectionStatus(nc, nc.Spec.VPCConnectivityProfile)
+			if err != nil {
+				log.Error(err, "Failed to get the connection status")
+				r.StatusUpdater.UpdateFail(ctx, networkInfoCR, err, fmt.Sprintf("Failed to validate the edge and gateway connection, Project: %s", nc.Spec.NSXProject), setNetworkInfoVPCStatusWithError, nil)
+				setNSNetworkReadyCondition(ctx, r.Client, req.Namespace, nsMsgVPCGwConnectionGetError.getNSNetworkCondition(err))
+				return common.ResultRequeueAfter10sec, err
+			}
+			log.Info("Got the connection status", "status", connectionStatus)
+			setVPCNetworkConfigurationStatusWithGatewayConnection(ctx, r.Client, systemVpcNetCfg, connectionStatus)
+			gatewayConnectionReady = connectionStatus.GatewayConnectionReady
+			serviceClusterReady = connectionStatus.ServiceClusterReady
 
-		// Retry after 60s if the gateway connection is still not ready in system VPC.
-		if !connectionStatus.GatewayConnectionReady && !connectionStatus.ServiceClusterReady {
-			log.Info("Requeue NetworkInfo CR because VPCNetworkConfiguration system is not ready", "connectionStatus", connectionStatus, "req", req)
-			retryWithSystemVPC = true
-			systemNSCondition = nsMsgVPCConnectionNotReady.getNSNetworkCondition()
+			// Retry after 60s if the gateway connection is still not ready in system VPC.
+			if !connectionStatus.GatewayConnectionReady && !connectionStatus.ServiceClusterReady {
+				log.Info("Requeue NetworkInfo CR because VPCNetworkConfiguration system is not ready", "connectionStatus", connectionStatus, "req", req)
+				retryWithSystemVPC = true
+				systemNSCondition = nsMsgVPCConnectionNotReady.getNSNetworkCondition()
+			}
 		}
 	}
 
