@@ -33,6 +33,13 @@ var (
 	NsSubnetPrecreated1      = "e2e-subnet-pre1-" + getRandomString()
 	NsSubnetPrecreated2      = "e2e-subnet-pre2-" + getRandomString()
 	NsSubnetPrecreatedTarget = "e2e-subnet-pre-target-" + getRandomString()
+
+	// NsMixedModeT1 and NsMixedModeVPC are used by mixed-mode scope gate tests.
+	// NsMixedModeT1 is a plain VC namespace (no vpc_network_config annotation → T1 scope).
+	// NsMixedModeVPC is a plain VC namespace that gets the vpc_network_config annotation
+	// injected by the test setup to simulate a VPC namespace.
+	NsMixedModeT1  = "e2e-mm-t1-" + getRandomString()
+	NsMixedModeVPC = "e2e-mm-vpc-" + getRandomString()
 )
 
 // allVCNamespaces is the list of namespaces that need to be created via VC API
@@ -56,6 +63,13 @@ var allVCNamespaces = []string{
 func InitAllNamespaces() error {
 	if testData == nil {
 		log.Info("Skipping batch namespace creation - testData is nil")
+		return nil
+	}
+
+	// Skip batch namespace creation if only running mixed-mode tests
+	// (mixed-mode tests create their own namespaces via setupMixedMode)
+	if testOptions.runMixedMode {
+		log.Info("Skipping batch namespace creation - running mixed-mode tests only")
 		return nil
 	}
 

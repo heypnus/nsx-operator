@@ -89,6 +89,7 @@ type TestOptions struct {
 	logsExportOnSuccess bool
 	debugLog            bool
 	logLevel            int
+	runMixedMode        bool
 }
 
 var testOptions TestOptions
@@ -1266,4 +1267,69 @@ func getRandomString() string {
 	timestamp := time.Now().UnixNano()
 	hash := sha256.Sum256([]byte(fmt.Sprintf("%d", timestamp)))
 	return hex.EncodeToString(hash[:])[:8]
+}
+
+// patchNamespaceAnnotation adds or removes an annotation on a K8s namespace object.
+// Pass an empty value to remove the annotation.
+func (data *TestData) patchNamespaceAnnotation(namespace, key, value string) error {
+	ns, err := data.clientset.CoreV1().Namespaces().Get(context.TODO(), namespace, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get namespace %s: %v", namespace, err)
+	}
+	if ns.Annotations == nil {
+		ns.Annotations = map[string]string{}
+	}
+	if value == "" {
+		delete(ns.Annotations, key)
+	} else {
+		ns.Annotations[key] = value
+	}
+	_, err = data.clientset.CoreV1().Namespaces().Update(context.TODO(), ns, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update namespace %s annotation: %v", namespace, err)
+	}
+	return nil
+}
+
+// hackSupervisorCapability patches the SupervisorCapabilities CR on the Supervisor cluster
+// to inject or remove the given capability under the "supervisor" category.
+// activated=true to enable, activated=false to disable.
+func hackSupervisorCapability(capability string, activated bool) error {
+	type capEntry struct {
+		Activated bool `json:"activated"`
+	}
+	patch := map[string]interface{}{
+		"status": map[string]interface{}{
+			"services": map[string]interface{}{
+				"supervisor": map[string]interface{}{
+					capability: capEntry{Activated: activated},
+				},
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("failed to marshal capability patch: %v", err)
+	}
+	// Try --subresource=status first, fall back to normal patch.
+	args := []string{
+		"patch", "supervisorcapabilities", "supervisor-capabilities",
+		"--type=merge", "--subresource=status",
+		"-p", string(patchBytes),
+	}
+	out, err := exec.Command("kubectl", args...).CombinedOutput()
+	if err != nil {
+		// fallback
+		args2 := []string{
+			"patch", "supervisorcapabilities", "supervisor-capabilities",
+			"--type=merge",
+			"-p", string(patchBytes),
+		}
+		out2, err2 := exec.Command("kubectl", args2...).CombinedOutput()
+		if err2 != nil {
+			return fmt.Errorf("failed to patch SupervisorCapabilities (status: %s; normal: %s): %v / %v",
+				string(out), string(out2), err, err2)
+		}
+	}
+	return nil
 }
