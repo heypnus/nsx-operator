@@ -26,6 +26,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -1272,23 +1273,42 @@ func getRandomString() string {
 // patchNamespaceAnnotation adds or removes an annotation on a K8s namespace object.
 // Pass an empty value to remove the annotation.
 func (data *TestData) patchNamespaceAnnotation(namespace, key, value string) error {
-	ns, err := data.clientset.CoreV1().Namespaces().Get(context.TODO(), namespace, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get namespace %s: %v", namespace, err)
-	}
-	if ns.Annotations == nil {
-		ns.Annotations = map[string]string{}
-	}
 	if value == "" {
-		delete(ns.Annotations, key)
+		// Remove annotation using JSON patch
+		patch := []byte(`[{"op":"remove","path":"/metadata/annotations/` + escapeJSONPatchPath(key) + `"}]`)
+		_, err := data.clientset.CoreV1().Namespaces().Patch(context.TODO(), namespace, types.JSONPatchType, patch, metav1.PatchOptions{})
+		if err != nil {
+			// If annotation doesn't exist, the remove will fail. That's OK - it means it's already gone.
+			if !strings.Contains(err.Error(), "no such key in map") {
+				return fmt.Errorf("failed to remove annotation from namespace %s: %v", namespace, err)
+			}
+		}
 	} else {
-		ns.Annotations[key] = value
-	}
-	_, err = data.clientset.CoreV1().Namespaces().Update(context.TODO(), ns, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to update namespace %s annotation: %v", namespace, err)
+		// Add/update annotation using JSON patch
+		patch := []byte(`[{"op":"add","path":"/metadata/annotations/` + escapeJSONPatchPath(key) + `","value":"` + escapeJSONString(value) + `"}]`)
+		_, err := data.clientset.CoreV1().Namespaces().Patch(context.TODO(), namespace, types.JSONPatchType, patch, metav1.PatchOptions{})
+		if err != nil {
+			// If path doesn't exist, try replace or add
+			patch = []byte(`[{"op":"replace","path":"/metadata/annotations/` + escapeJSONPatchPath(key) + `","value":"` + escapeJSONString(value) + `"}]`)
+			_, err = data.clientset.CoreV1().Namespaces().Patch(context.TODO(), namespace, types.JSONPatchType, patch, metav1.PatchOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to add annotation to namespace %s: %v", namespace, err)
+			}
+		}
 	}
 	return nil
+}
+
+func escapeJSONPatchPath(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	s = strings.ReplaceAll(s, "/", "~1")
+	return s
+}
+
+func escapeJSONString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
 }
 
 // hackSupervisorCapability patches the SupervisorCapabilities CR on the Supervisor cluster

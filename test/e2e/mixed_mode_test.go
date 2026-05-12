@@ -81,8 +81,9 @@ func setupMixedMode(t *testing.T) (func(), string, string) {
 	// Verify the annotation was actually removed
 	ns, err := testData.clientset.CoreV1().Namespaces().Get(context.TODO(), mmT1, metav1.GetOptions{})
 	require.NoError(t, err, "failed to get namespace after annotation removal")
-	if val, exists := ns.Annotations[common.AnnotationVPCNetworkConfig]; exists && val != "" {
+	if val, exists := ns.Annotations[common.AnnotationVPCNetworkConfig]; exists {
 		t.Logf("WARNING: vpc_network_config annotation still exists on T1 namespace after deletion: %v", val)
+		t.Logf("Full annotations: %v", ns.Annotations)
 	} else {
 		t.Logf("✓ vpc_network_config annotation successfully removed from %s", mmT1)
 	}
