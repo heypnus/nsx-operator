@@ -1274,41 +1274,26 @@ func getRandomString() string {
 // Pass an empty value to remove the annotation.
 func (data *TestData) patchNamespaceAnnotation(namespace, key, value string) error {
 	if value == "" {
-		// Remove annotation using JSON patch
-		patch := []byte(`[{"op":"remove","path":"/metadata/annotations/` + escapeJSONPatchPath(key) + `"}]`)
-		_, err := data.clientset.CoreV1().Namespaces().Patch(context.TODO(), namespace, types.JSONPatchType, patch, metav1.PatchOptions{})
+		// Remove annotation using kubectl patch with strategic merge
+		cmdStr := fmt.Sprintf(`kubectl patch ns %s -p '{"metadata":{"annotations":{"%s":null}}}'`, namespace, key)
+		output, err := exec.Command("sh", "-c", cmdStr).CombinedOutput()
 		if err != nil {
-			// If annotation doesn't exist, the remove will fail. That's OK - it means it's already gone.
-			if !strings.Contains(err.Error(), "no such key in map") {
-				return fmt.Errorf("failed to remove annotation from namespace %s: %v", namespace, err)
-			}
+			return fmt.Errorf("failed to remove annotation from namespace %s: %v, output: %s", namespace, err, string(output))
 		}
 	} else {
-		// Add/update annotation using JSON patch
-		patch := []byte(`[{"op":"add","path":"/metadata/annotations/` + escapeJSONPatchPath(key) + `","value":"` + escapeJSONString(value) + `"}]`)
-		_, err := data.clientset.CoreV1().Namespaces().Patch(context.TODO(), namespace, types.JSONPatchType, patch, metav1.PatchOptions{})
+		// Add/update annotation using kubectl patch
+		cmdStr := fmt.Sprintf(`kubectl patch ns %s -p '{"metadata":{"annotations":{"%s":"%s"}}}'`, namespace, key, escapeShellString(value))
+		output, err := exec.Command("sh", "-c", cmdStr).CombinedOutput()
 		if err != nil {
-			// If path doesn't exist, try replace or add
-			patch = []byte(`[{"op":"replace","path":"/metadata/annotations/` + escapeJSONPatchPath(key) + `","value":"` + escapeJSONString(value) + `"}]`)
-			_, err = data.clientset.CoreV1().Namespaces().Patch(context.TODO(), namespace, types.JSONPatchType, patch, metav1.PatchOptions{})
-			if err != nil {
-				return fmt.Errorf("failed to add annotation to namespace %s: %v", namespace, err)
-			}
+			return fmt.Errorf("failed to add annotation to namespace %s: %v, output: %s", namespace, err, string(output))
 		}
 	}
 	return nil
 }
 
-func escapeJSONPatchPath(s string) string {
-	s = strings.ReplaceAll(s, "~", "~0")
-	s = strings.ReplaceAll(s, "/", "~1")
-	return s
-}
-
-func escapeJSONString(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return s
+func escapeShellString(s string) string {
+	// Escape single quotes for shell
+	return strings.ReplaceAll(s, "'", "'\\''")
 }
 
 // hackSupervisorCapability patches the SupervisorCapabilities CR on the Supervisor cluster
