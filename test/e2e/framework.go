@@ -26,7 +26,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -1274,15 +1273,18 @@ func getRandomString() string {
 // Pass an empty value to remove the annotation.
 func (data *TestData) patchNamespaceAnnotation(namespace, key, value string) error {
 	if value == "" {
-		// Remove annotation using kubectl patch with strategic merge
-		cmdStr := fmt.Sprintf(`kubectl patch ns %s -p '{"metadata":{"annotations":{"%s":null}}}'`, namespace, key)
+		// Remove annotation using kubectl annotate with override
+		cmdStr := fmt.Sprintf(`kubectl annotate ns %s %s- --overwrite`, namespace, key)
 		output, err := exec.Command("sh", "-c", cmdStr).CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("failed to remove annotation from namespace %s: %v, output: %s", namespace, err, string(output))
+			// annotation might not exist, which is fine
+			if !strings.Contains(string(output), "not found") {
+				return fmt.Errorf("failed to remove annotation from namespace %s: %v, output: %s", namespace, err, string(output))
+			}
 		}
 	} else {
-		// Add/update annotation using kubectl patch
-		cmdStr := fmt.Sprintf(`kubectl patch ns %s -p '{"metadata":{"annotations":{"%s":"%s"}}}'`, namespace, key, escapeShellString(value))
+		// Add/update annotation using kubectl annotate
+		cmdStr := fmt.Sprintf(`kubectl annotate ns %s %s=%s --overwrite`, namespace, key, escapeShellValue(value))
 		output, err := exec.Command("sh", "-c", cmdStr).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("failed to add annotation to namespace %s: %v, output: %s", namespace, err, string(output))
@@ -1291,9 +1293,13 @@ func (data *TestData) patchNamespaceAnnotation(namespace, key, value string) err
 	return nil
 }
 
-func escapeShellString(s string) string {
-	// Escape single quotes for shell
-	return strings.ReplaceAll(s, "'", "'\\''")
+func escapeShellValue(s string) string {
+	// Use double quotes and escape special characters
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, `$`, `\$`)
+	s = strings.ReplaceAll(s, "`", "\\`")
+	return `"` + s + `"`
 }
 
 // hackSupervisorCapability patches the SupervisorCapabilities CR on the Supervisor cluster

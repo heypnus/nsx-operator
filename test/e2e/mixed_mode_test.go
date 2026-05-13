@@ -49,7 +49,7 @@ func setupMixedMode(t *testing.T) (func(), string, string) {
 
 	// Generate unique namespace names for this test run
 	// (avoid reusing the global constants which would cause "namespace already exists" errors)
-	mmT1  := "e2e-mm-t1-" + getRandomString()
+	mmT1 := "e2e-mm-t1-" + getRandomString()
 	mmVPC := "e2e-mm-vpc-" + getRandomString()
 
 	t.Log("Enabling supports_per_namespace_network_providers on SupervisorCapabilities CR")
@@ -77,16 +77,29 @@ func setupMixedMode(t *testing.T) (func(), string, string) {
 	require.NoError(t,
 		testData.patchNamespaceAnnotation(mmT1, common.AnnotationVPCNetworkConfig, ""),
 		"failed to remove vpc_network_config annotation")
-	
-	// Verify the annotation was actually removed
-	ns, err := testData.clientset.CoreV1().Namespaces().Get(context.TODO(), mmT1, metav1.GetOptions{})
-	require.NoError(t, err, "failed to get namespace after annotation removal")
-	if val, exists := ns.Annotations[common.AnnotationVPCNetworkConfig]; exists {
-		t.Logf("WARNING: vpc_network_config annotation still exists on T1 namespace after deletion: %v", val)
-		t.Logf("Full annotations: %v", ns.Annotations)
-	} else {
-		t.Logf("✓ vpc_network_config annotation successfully removed from %s", mmT1)
+
+	// Verify the annotation was actually removed by polling with a fresh read
+	var nsAfterRemoval *corev1.Namespace
+	err := wait.PollUntilContextTimeout(context.TODO(), 500*time.Millisecond, 10*time.Second, false,
+		func(ctx context.Context) (bool, error) {
+			nsAfterRemoval, err := testData.clientset.CoreV1().Namespaces().Get(context.TODO(), mmT1, metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+			if val, exists := nsAfterRemoval.Annotations[common.AnnotationVPCNetworkConfig]; !exists {
+				// annotation successfully removed
+				return true, nil
+			} else {
+				t.Logf("Annotation still exists: %v, retrying...", val)
+				return false, nil
+			}
+		})
+	require.NoError(t, err, "annotation removal verification timeout or error")
+
+	if val, exists := nsAfterRemoval.Annotations[common.AnnotationVPCNetworkConfig]; exists {
+		t.Fatalf("FAILED: vpc_network_config annotation still exists on T1 namespace after deletion: %v. Full annotations: %v", val, nsAfterRemoval.Annotations)
 	}
+	t.Logf("✓ vpc_network_config annotation successfully removed from %s", mmT1)
 
 	// 4. Wait for NCP to pick up the annotation change (refresh interval is 30s).
 	//    After this wait, NCP should have updated its mixed-mode state:
@@ -113,7 +126,7 @@ func TestMixedMode_T1Controller_Normal(t *testing.T) {
 
 	cleanup, mmT1, mmVPC := setupMixedMode(t)
 	defer cleanup()
-	_ = mmVPC  // VPC namespace is created but not used in this test
+	_ = mmVPC // VPC namespace is created but not used in this test
 
 	ns := mmT1
 	podName := "mm-t1-pod"
@@ -156,7 +169,7 @@ func TestMixedMode_T1Controller_IgnoreVPC(t *testing.T) {
 
 	cleanup, mmT1, mmVPC := setupMixedMode(t)
 	defer cleanup()
-	_ = mmT1  // T1 namespace is created but not used in this test
+	_ = mmT1 // T1 namespace is created but not used in this test
 
 	ns := mmVPC
 	podName := "mm-vpc-pod"
@@ -201,7 +214,7 @@ func TestMixedMode_VPCController_IgnoreT1(t *testing.T) {
 
 	cleanup, mmT1, mmVPC := setupMixedMode(t)
 	defer cleanup()
-	_ = mmVPC  // VPC namespace is created but not used in this test
+	_ = mmVPC // VPC namespace is created but not used in this test
 
 	ns := mmT1
 
