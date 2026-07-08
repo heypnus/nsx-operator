@@ -580,7 +580,6 @@ func resetMixedModeState() {
 	defer stateMu.Unlock()
 	hasT1Namespaces = false
 	hasVPCNamespaces = false
-	hasVDSNamespaces = false
 	stateInitialized = false
 	perNamespaceProvidersSupported = nil
 }
